@@ -1,0 +1,165 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import io
+import folium
+from streamlit_folium import st_folium
+
+st.set_page_config(page_title="Web GIS Ketelitian Ortopoto", layout="wide")
+
+# Styling kustom sidebar mirip gaya panel referensi
+st.markdown("""
+    <style>
+    .main { background-color: #f8f9fa; }
+    h1, h2, h3 { color: #0f172a; }
+    </style>
+""", unsafe_allow_html=True)
+
+# Sidebar Panel Kontrol
+st.sidebar.markdown("""
+    <div style="background-color: #1e3a8a; padding: 15px; border-radius: 8px; color: white; margin-bottom: 20px;">
+        <h3 style="color: white; margin: 0; font-size: 15px;">PEMBUATAN WEB GIS KETELITIAN ORTOPOTO</h3>
+        <p style="font-size: 11px; margin-top: 5px; color: #cbd5e1;">Visualisasi & Analisis Akurasi GCP/ICP</p>
+    </div>
+""", unsafe_allow_html=True)
+
+st.sidebar.subheader("1. Upload Data Lapangan (.xlsx / .csv)")
+file_lapangan = st.sidebar.file_uploader("Pilih file titik ukur lapangan", type=["xlsx", "xls", "csv"], key="lap")
+
+st.sidebar.subheader("2. Upload Data Foto / Software (.xlsx / .csv)")
+file_foto = st.sidebar.file_uploader("Pilih file titik ekstrak software", type=["xlsx", "xls", "csv"], key="fot")
+
+st.sidebar.markdown("---")
+hitung_btn = st.sidebar.button("🚀 HITUNG & PETAKAN TITIK", use_container_width=True)
+
+# Main Title Area
+st.title("Web GIS Visualisasi & Analisis Ketelitian Ortopoto")
+st.markdown("Aplikasi web interaktif untuk evaluasi akurasi geometrik ortopoto berbasis perbandingan titik uji lapangan dan hasil ekstraksi software fotogrametri.")
+
+# Cek ketersediaan file yang diupload
+if file_lapangan is not None and file_foto is not None:
+    try:
+        # Membaca file lapangan
+        if file_lapangan.name.endswith('.csv'):
+            df_lap = pd.read_csv(file_lapangan)
+        else:
+            df_lap = pd.read_excel(file_lapangan)
+            
+        # Membaca file foto/software
+        if file_foto.name.endswith('.csv'):
+            df_fot = pd.read_csv(file_foto)
+        else:
+            df_fot = pd.read_excel(file_foto)
+            
+        st.success("✅ Data Lapangan dan Data Foto berhasil diunggah!")
+        
+        # Preview data
+        col_prev1, col_prev2 = st.columns(2)
+        with col_prev1:
+            st.subheader("Preview Data Lapangan")
+            st.dataframe(df_lap.head(3), use_container_width=True)
+        with col_prev2:
+            st.subheader("Preview Data Foto / Software")
+            st.dataframe(df_fot.head(3), use_container_width=True)
+            
+        # Konfigurasi / Mapping Kolom
+        cols_lap = df_lap.columns.tolist()
+        cols_fot = df_fot.columns.tolist()
+        
+        with st.expander("⚙️ Pengaturan Kolom (Mapping ID & Koordinat X, Y)"):
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown("**Kolom Data Lapangan**")
+                id_lap = st.selectbox("Kolom ID / Nama Titik (Lap)", cols_lap, index=0)
+                x_lap = st.selectbox("Kolom X (Easting) Lapangan", cols_lap, index=1 if len(cols_lap)>1 else 0)
+                y_lap = st.selectbox("Kolom Y (Northing) Lapangan", cols_lap, index=2 if len(cols_lap)>2 else 0)
+            with c2:
+                st.markdown("**Kolom Data Foto / Software**")
+                id_fot = st.selectbox("Kolom ID / Nama Titik (Foto)", cols_fot, index=0)
+                x_fot = st.selectbox("Kolom X (Easting) Software", cols_fot, index=1 if len(cols_fot)>1 else 0)
+                y_fot = st.selectbox("Kolom Y (Northing) Software", cols_fot, index=2 if len(cols_fot)>2 else 0)
+
+        if hitung_btn or True:
+            # Standarisasi ID untuk proses merge
+            df_lap['clean_id'] = df_lap[id_lap].astype(str).str.strip().str.upper()
+            df_fot['clean_id'] = df_fot[id_fot].astype(str).str.strip().str.upper()
+            
+            merged = pd.merge(df_lap, df_fot, on='clean_id', suffixes=('_lap', '_fot'))
+            
+            if len(merged) == 0:
+                st.warning("⚠️️ Tidak ada kecocokan ID Titik antara Data Lapangan dan Data Foto. Pastikan nama/nomor titik sama.")
+            else:
+                # Perhitungan Selisih & RMSE
+                res_df = pd.DataFrame()
+                res_df['NO NAMA TITIK'] = merged['clean_id']
+                res_df['X DIGITASI'] = merged[x_fot]
+                res_df['Y DIGITASI'] = merged[y_fot]
+                res_df['X LAPANGAN'] = merged[x_lap]
+                res_df['Y LAPANGAN'] = merged[y_lap]
+                
+                res_df['( D X )'] = res_df['X DIGITASI'] - res_df['X LAPANGAN']
+                res_df['( D X )^2'] = res_df['( D X )'] ** 2
+                res_df['( D Y )'] = res_df['Y DIGITASI'] - res_df['Y LAPANGAN']
+                res_df['( D Y )^2'] = res_df['( D Y )'] ** 2
+                res_df['( D X )^2 + ( D Y )^2'] = res_df['( D X )^2'] + res_df['( D Y )^2']
+                
+                n = len(res_df)
+                rmse_x = np.sqrt(res_df['( D X )^2'].sum() / n)
+                rmse_y = np.sqrt(res_df['( D Y )^2'].sum() / n)
+                ce90 = 2.146 * 0.5 * (rmse_x + rmse_y)
+                
+                # Layout Peta Web GIS
+                st.subheader("🗺️ Peta Sebaran Titik Uji (Web GIS)")
+                
+                # Inisialisasi Peta Leaflet (pusat default, dapat disesuaikan)
+                m = folium.Map(location=[-2.548926, 118.014863], zoom_start=5)
+                
+                # Tambahkan layer pilihan peta (Basemap)
+                folium.TileLayer('CartoDB positron', name='Citra / Peta Terang').add_to(m)
+                folium.TileLayer('OpenStreetMap', name='Topografi (OpenTopoMap)').add_to(m)
+                folium.LayerControl().add_to(m)
+                
+                # Render Peta di Streamlit
+                st_folium(m, width="100%", height=420)
+                
+                # Tabel Hasil Kalkulasi
+                st.subheader("📊 Tabel Hasil Analisis Ketelitian Posisi Hz")
+                st.dataframe(res_df, use_container_width=True)
+                
+                # Ringkasan Metrik
+                col1, col2, col3, col4 = st.columns(4)
+                col1.metric("Jumlah Titik (n)", n)
+                col2.metric("RMSE X", f"{rmse_x:.4f} m")
+                col3.metric("RMSE Y", f"{rmse_y:.4f} m")
+                col4.metric("Hasil Uji CE 90", f"{ce90:.3f} m")
+                
+                # Kesimpulan Skala 1:25.000
+                if ce90 <= 7.5:
+                    kelas = "Kelas 1 (Maks 7.5 meter)"
+                elif ce90 <= 15.0:
+                    kelas = "Kelas 2 (Maks 15.0 meter)"
+                elif ce90 <= 22.5:
+                    kelas = "Kelas 3 (Maks 22.5 meter)"
+                else:
+                    kelas = "Tidak Memenuhi Standar Kelas 1-3"
+                    
+                st.info(f"📌 **Kesimpulan:** Dari hasil pengecekan ICP yang telah dilakukan didapatkan akurasi senilai **{ce90:.3f} meter**. Maka nilai tersebut sesuai untuk ketelitian peta dasar skala **1:25.000 {kelas}**.")
+                
+                # Tombol Download Excel
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    res_df.to_excel(writer, sheet_name='Uji Ketelitian Posisi Hz', index=False)
+                output.seek(0)
+                
+                st.download_button(
+                    label="📥 Download Hasil Perhitungan Berformat Excel (.xlsx)",
+                    data=output,
+                    file_name="Hasil_Uji_Ketelitian_Ortopoto.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+                
+    except Exception as e:
+        st.error(f"Terjadi kesalahan saat membaca file: {e}")
+else:
+    st.info("👈 Silakan **Upload Data Lapangan** dan **Data Foto/Software** melalui menu di panel sebelah kiri untuk mulai menampilkan peta dan kalkulasi.")
